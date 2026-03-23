@@ -40,8 +40,4 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# generated videos + db
-/public/videos/
-/db/*.db
-/db/*.db-shm
-/db/*.db-wal
+# generated videos + db tracked via Git LFS
