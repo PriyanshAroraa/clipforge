@@ -1,53 +1,117 @@
-import { NextRequest, NextResponse } from 'next/server';
-import db from '@/db/index';
-import { runEngine, extractThumbnail, EngineType } from '@/lib/engines/runner';
-import fs from 'fs';
-import path from 'path';
+import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@/utils/supabase/server'
+import { runEngine, extractThumbnail, EngineType } from '@/lib/engines/runner'
+import { createClient as createServiceClient } from '@supabase/supabase-js'
+import fs from 'fs'
+import path from 'path'
 
-const ENGINES: EngineType[] = ['wall_of_text', 'hook_demo', 'meme_video', 'reddit_video'];
+const ENGINES: EngineType[] = ['wall_of_text', 'hook_demo', 'meme_video', 'reddit_video']
 
-export async function POST(req: NextRequest) {
-  const { brandId, engines = ENGINES } = await req.json();
-  const brand = db.prepare('SELECT * FROM brands WHERE id = ?').get(brandId) as any;
-  if (!brand) return NextResponse.json({ error: 'Brand not found' }, { status: 404 });
-
-  const jobIds: number[] = [];
-
-  for (const engine of engines) {
-    const job = db.prepare('INSERT INTO jobs (brand_id, engine, status) VALUES (?, ?, ?)').run(brandId, engine, 'pending');
-    jobIds.push(job.lastInsertRowid as number);
+// Create a client for background tasks that outlive the request.
+// Uses the service role key if available (bypasses RLS), otherwise
+// creates an authenticated client using the user's access token.
+function createBackgroundClient(accessToken?: string) {
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (serviceKey) {
+    return createServiceClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, serviceKey)
   }
-
-  // Fire and forget
-  void runAllEngines(brand, engines, jobIds);
-
-  return NextResponse.json({ jobIds });
+  // Fallback: use publishable key with the user's access token for RLS
+  return createServiceClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY!,
+    { global: { headers: { Authorization: `Bearer ${accessToken}` } } }
+  )
 }
 
-async function runAllEngines(brand: any, engines: EngineType[], jobIds: number[]) {
-  for (let i = 0; i < engines.length; i++) {
-    const engine = engines[i];
-    const jobId = jobIds[i];
+export async function POST(req: NextRequest) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    db.prepare('UPDATE jobs SET status = ?, started_at = unixepoch() WHERE id = ?').run('running', jobId);
+  // Get the user's session token for background operations
+  const { data: { session } } = await supabase.auth.getSession()
 
-    try {
-      const { outputPath } = await runEngine(engine, brand.url);
-      const thumb = await extractThumbnail(outputPath);
-      const stat = fs.statSync(outputPath);
-      const publicUrl = '/videos/' + path.basename(outputPath);
-      const thumbUrl = thumb ? '/videos/' + path.basename(thumb) : null;
+  const { brandId, engines = ENGINES } = await req.json()
 
-      const video = db.prepare(
-        'INSERT INTO videos (brand_id, engine, file_path, public_url, status, thumbnail, file_size_mb) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).run(brand.id, engine, outputPath, publicUrl, 'ready', thumbUrl, +(stat.size / 1024 / 1024).toFixed(1));
+  const { data: brand } = await supabase
+    .from('brands')
+    .select('*')
+    .eq('id', brandId)
+    .single()
 
-      db.prepare('UPDATE jobs SET status = ?, finished_at = unixepoch(), video_id = ? WHERE id = ?')
-        .run('done', video.lastInsertRowid, jobId);
+  if (!brand) return NextResponse.json({ error: 'Brand not found' }, { status: 404 })
 
-    } catch(e: any) {
-      db.prepare('UPDATE jobs SET status = ?, error_msg = ?, finished_at = unixepoch() WHERE id = ?')
-        .run('error', e.message?.slice(0,500), jobId);
-    }
-  }
+  // Create job records
+  const jobInserts = engines.map((engine: EngineType) => ({
+    brand_id: brandId,
+    user_id: user.id,
+    engine,
+    status: 'pending',
+  }))
+
+  const { data: jobs, error } = await supabase
+    .from('jobs')
+    .insert(jobInserts)
+    .select('id')
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+  const jobIds = jobs.map((j: { id: string }) => j.id)
+
+  // Fire and forget — background client with user's token for RLS
+  const bgClient = createBackgroundClient(session?.access_token)
+  void runAllEngines(brand, engines, jobIds, user.id, bgClient)
+
+  return NextResponse.json({ jobIds })
+}
+
+async function runAllEngines(
+  brand: any,
+  engines: EngineType[],
+  jobIds: string[],
+  userId: string,
+  supabase: ReturnType<typeof createServiceClient>
+) {
+  // Run all engines in parallel — each video appears in blitz as soon as it's ready
+  await Promise.allSettled(
+    engines.map(async (engine, i) => {
+      const jobId = jobIds[i]
+
+      await supabase.from('jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', jobId)
+
+      try {
+        const { outputPath } = await runEngine(engine, brand.url)
+        const thumb = await extractThumbnail(outputPath)
+        const stat = fs.statSync(outputPath)
+        const publicUrl = '/videos/' + path.basename(outputPath)
+        const thumbUrl = thumb ? '/videos/' + path.basename(thumb) : null
+
+        const { data: video } = await supabase
+          .from('videos')
+          .insert({
+            brand_id: brand.id,
+            user_id: userId,
+            engine,
+            file_path: outputPath,
+            public_url: publicUrl,
+            status: 'ready',
+            thumbnail: thumbUrl,
+            file_size_mb: +(stat.size / 1024 / 1024).toFixed(1),
+          })
+          .select('id')
+          .single()
+
+        await supabase
+          .from('jobs')
+          .update({ status: 'done', finished_at: new Date().toISOString(), video_id: video?.id })
+          .eq('id', jobId)
+
+      } catch (e: any) {
+        await supabase
+          .from('jobs')
+          .update({ status: 'error', error_msg: e.message?.slice(0, 500), finished_at: new Date().toISOString() })
+          .eq('id', jobId)
+      }
+    })
+  )
 }

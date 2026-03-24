@@ -28,6 +28,7 @@ export async function runEngine(engine: EngineType, brandUrl: string): Promise<{
     CLIPFORGE_OUTPUT: outputPath,
     CLIPFORGE_SITE_URL: brandUrl,
     CLIPFORGE_GEMINI_KEY: process.env.GEMINI_KEY || '',
+    DRIVE_BG_FOLDER_ID: process.env.DRIVE_BG_FOLDER_ID || '',
   };
 
   return new Promise((resolve, reject) => {

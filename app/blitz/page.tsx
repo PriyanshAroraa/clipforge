@@ -28,6 +28,8 @@ const ENGINE_COLORS: Record<string, string> = {
   reddit_video: 'bg-orange-500/20 text-orange-300 border border-orange-500/20',
 }
 
+const BATCH_SIZE = 4
+
 export default function BlitzPage() {
   const [videos, setVideos] = useState<Video[]>([])
   const [index, setIndex] = useState(0)
@@ -38,64 +40,89 @@ export default function BlitzPage() {
   const startX = useRef(0)
   const videoRef = useRef<HTMLVideoElement>(null)
   const generatingRef = useRef(false)
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const seenIds = useRef(new Set<number>())
 
-  // Auto-generate more when running low
+  // Fetch next batch of unswiped videos (up to BATCH_SIZE)
+  const fetchBatch = useCallback(async (): Promise<Video[]> => {
+    const res = await fetch(`/api/videos?unswiped=true&limit=${BATCH_SIZE}`)
+    const data = await res.json()
+    return Array.isArray(data) ? data : []
+  }, [])
+
+  // Poll for newly generated videos and append them as they appear
+  const startPolling = useCallback(() => {
+    if (pollRef.current) return
+    const poll = async () => {
+      try {
+        const fresh = await fetchBatch()
+        if (fresh.length > 0) {
+          setVideos(prev => {
+            const existingIds = new Set(prev.map(v => v.id))
+            const newOnes = fresh.filter(v => !existingIds.has(v.id) && !seenIds.current.has(v.id))
+            if (newOnes.length > 0) return [...prev, ...newOnes]
+            return prev
+          })
+        }
+      } catch {}
+      pollRef.current = setTimeout(poll, 3000)
+    }
+    pollRef.current = setTimeout(poll, 2000)
+  }, [fetchBatch])
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearTimeout(pollRef.current)
+      pollRef.current = null
+    }
+  }, [])
+
+  // Auto-generate more videos
   const triggerGenerate = useCallback(async () => {
     if (generatingRef.current) return
-    const brandId = typeof window !== 'undefined' ? localStorage.getItem('clipforge_brand_id') : null
-    if (!brandId) return
+    const brandRes = await fetch('/api/onboarding')
+    const brand = await brandRes.json()
+    if (!brand?.id) return
     generatingRef.current = true
     setGenerating(true)
     try {
       await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ brandId: Number(brandId) })
+        body: JSON.stringify({ brandId: brand.id })
       })
-      // Poll until new videos appear then append them
-      const poll = async () => {
-        const res = await fetch('/api/videos?unswiped=true')
-        const data = await res.json()
-        if (data.length > 0) {
-          setVideos(prev => {
-            const existingIds = new Set(prev.map(v => v.id))
-            const newOnes = data.filter((v: Video) => !existingIds.has(v.id))
-            return newOnes.length > 0 ? [...prev, ...newOnes] : prev
-          })
-          generatingRef.current = false
-          setGenerating(false)
-          // Immediately queue another batch so there's always content ahead
-          setTimeout(() => triggerGenerate(), 1000)
-        } else {
-          setTimeout(poll, 4000)
-        }
-      }
-      setTimeout(poll, 5000)
+      // Start polling for results as they come in
+      startPolling()
+      // Stop polling after 3 minutes (safety timeout)
+      setTimeout(() => {
+        stopPolling()
+        generatingRef.current = false
+        setGenerating(false)
+      }, 180000)
     } catch {
       generatingRef.current = false
       setGenerating(false)
     }
-  }, [])
+  }, [startPolling, stopPolling])
 
+  // Initial load
   useEffect(() => {
-    fetchVideos().then((count) => {
-      if (count === 0) triggerGenerate()
-    })
-  }, [triggerGenerate])
-
-  async function fetchVideos(): Promise<number> {
-    setLoading(true)
-    const res = await fetch('/api/videos?unswiped=true')
-    const data = await res.json()
-    setVideos(data)
-    setIndex(0)
-    setLoading(false)
-    return data.length
-  }
+    async function init() {
+      setLoading(true)
+      const batch = await fetchBatch()
+      setVideos(batch)
+      setIndex(0)
+      setLoading(false)
+      if (batch.length === 0) triggerGenerate()
+    }
+    init()
+    return () => stopPolling()
+  }, [fetchBatch, triggerGenerate, stopPolling])
 
   async function swipe(action: 'saved' | 'skipped') {
     const video = videos[index]
     if (!video) return
+    seenIds.current.add(video.id)
     await fetch(`/api/videos/${video.id}/swipe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -104,10 +131,18 @@ export default function BlitzPage() {
     setDragX(0)
     const nextIndex = index + 1
     setIndex(nextIndex)
-    // Auto-generate when 4 cards left — keeps a rolling buffer
+
     const remaining = videos.length - nextIndex
-    if (remaining <= 4) {
-      triggerGenerate()
+    // When running low, fetch more or generate
+    if (remaining <= 1) {
+      const more = await fetchBatch()
+      const existingIds = new Set(videos.map(v => v.id))
+      const newOnes = more.filter(v => !existingIds.has(v.id) && !seenIds.current.has(v.id))
+      if (newOnes.length > 0) {
+        setVideos(prev => [...prev, ...newOnes])
+      } else if (!generatingRef.current) {
+        triggerGenerate()
+      }
     }
   }
 
@@ -132,10 +167,8 @@ export default function BlitzPage() {
   const next = videos[index + 1]
   const hasMore = index < videos.length
 
-  // Loading state
   if (loading) return (
     <div className="flex flex-col items-center justify-center h-full gap-6">
-      {/* Skeleton card */}
       <div className="w-full max-w-[340px]" style={{ height: 600 }}>
         <div className="w-full h-full rounded-2xl bg-zinc-900 border border-zinc-800/60 overflow-hidden animate-pulse">
           <div className="w-full h-full bg-gradient-to-b from-zinc-800/60 to-zinc-900" />
@@ -144,12 +177,10 @@ export default function BlitzPage() {
     </div>
   )
 
-  // Empty / generating state
   if (!hasMore || !current) return (
     <div className="flex flex-col items-center justify-center h-full gap-5 px-4">
       {generating ? (
         <>
-          {/* Pulsing skeleton card */}
           <div className="relative w-full max-w-[340px] rounded-2xl overflow-hidden border border-zinc-800/60 bg-zinc-900"
             style={{ height: 600 }}>
             <div className="absolute inset-0 bg-gradient-to-b from-zinc-800/40 to-zinc-900/80 animate-pulse" />
@@ -157,7 +188,7 @@ export default function BlitzPage() {
               <div className="w-12 h-12 rounded-full border-[3px] border-orange-500 border-t-transparent animate-spin" />
               <div className="text-center space-y-1.5">
                 <p className="text-white font-semibold text-sm">Generating content</p>
-                <p className="text-zinc-500 text-xs">Running all 4 engines in parallel</p>
+                <p className="text-zinc-500 text-xs">Videos appear as each engine finishes</p>
               </div>
               <div className="flex gap-1.5 mt-2">
                 {[0,1,2].map(i => (
@@ -188,7 +219,14 @@ export default function BlitzPage() {
           </div>
           <div className="flex gap-3 mt-1">
             <button
-              onClick={fetchVideos}
+              onClick={async () => {
+                setLoading(true)
+                const batch = await fetchBatch()
+                setVideos(batch)
+                setIndex(0)
+                setLoading(false)
+                if (batch.length === 0) triggerGenerate()
+              }}
               className="flex items-center gap-2 px-4 py-2.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 hover:text-white rounded-xl text-sm font-medium transition-all duration-200"
             >
               <RefreshCw size={13} /> Refresh
@@ -265,7 +303,6 @@ export default function BlitzPage() {
           onPointerUp={onPointerUp}
           onPointerLeave={onPointerUp}
         >
-          {/* Video */}
           <video
             ref={videoRef}
             src={current.public_url}
@@ -274,13 +311,9 @@ export default function BlitzPage() {
             autoPlay muted loop playsInline
           />
 
-          {/* Top gradient overlay */}
           <div className="absolute top-0 left-0 right-0 h-28 bg-gradient-to-b from-black/60 to-transparent pointer-events-none" />
-
-          {/* Bottom heavy gradient overlay */}
           <div className="absolute bottom-0 left-0 right-0 h-48 bg-gradient-to-t from-black/90 via-black/50 to-transparent pointer-events-none" />
 
-          {/* SAVE indicator */}
           {saveOpacity > 0.1 && (
             <div
               className="absolute top-10 left-5 rounded-xl px-4 py-2 rotate-[-15deg] border-[3px] border-emerald-400"
@@ -292,7 +325,6 @@ export default function BlitzPage() {
             </div>
           )}
 
-          {/* SKIP indicator */}
           {skipOpacity > 0.1 && (
             <div
               className="absolute top-10 right-5 rounded-xl px-4 py-2 rotate-[15deg] border-[3px] border-red-400"
@@ -304,7 +336,6 @@ export default function BlitzPage() {
             </div>
           )}
 
-          {/* Engine badge - frosted glass */}
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
             <span
               className={`text-xs font-semibold px-3 py-1.5 rounded-full backdrop-blur-md ${ENGINE_COLORS[current.engine] || 'bg-white/10 text-white/80 border border-white/10'}`}
@@ -313,7 +344,6 @@ export default function BlitzPage() {
             </span>
           </div>
 
-          {/* Caption */}
           <div className="absolute bottom-0 left-0 right-0 p-5 pt-12 z-10 pointer-events-none">
             {current.caption && (
               <p className="text-white text-sm font-medium leading-relaxed line-clamp-3">

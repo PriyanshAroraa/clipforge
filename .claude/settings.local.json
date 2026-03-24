@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where ffmpeg:*)",
+      "Read(//c/Program Files/Google/Chrome/Application/**)",
+      "Bash(npm install:*)",
+      "Bash(npx next:*)",
+      "Bash(curl -s http://localhost:3000/api/videos?unswiped=true)",
+      "Bash(ffmpeg -version)",
+      "Bash(C:/ffmpeg/bin/ffmpeg.exe -version)"
+    ]
+  },
+  "env": {
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "AWS_REGION": "ap-south-1"
+  }
+}

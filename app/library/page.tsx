@@ -1,10 +1,15 @@
 'use client'
 import { useEffect, useState } from 'react'
-import { BookImage, Download, Calendar, Play, X } from 'lucide-react'
+import { BookImage, Download, Calendar, Play, X, Send, Check, AlertCircle } from 'lucide-react'
 
 interface Video {
-  id: number; engine: string; public_url: string; thumbnail: string
-  caption: string; file_size_mb: number; brand_name: string; swiped_at: number
+  id: string; engine: string; public_url: string; thumbnail: string
+  caption: string; file_size_mb: number; brands?: { name: string }; swiped_at: string
+}
+
+interface PlatformConnection {
+  platform: string
+  platform_username: string | null
 }
 
 const ENGINE_LABELS: Record<string, string> = {
@@ -32,10 +37,68 @@ export default function LibraryPage() {
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<Video | null>(null)
   const [activeTab, setActiveTab] = useState('All')
+  const [connections, setConnections] = useState<PlatformConnection[]>([])
+  const [showPostModal, setShowPostModal] = useState(false)
+  const [postPlatform, setPostPlatform] = useState<string | null>(null)
+  const [postCaption, setPostCaption] = useState('')
+  const [postLoading, setPostLoading] = useState(false)
+  const [postResult, setPostResult] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [showSchedule, setShowSchedule] = useState(false)
+  const [scheduleDate, setScheduleDate] = useState('')
+  const [scheduleTime, setScheduleTime] = useState('')
 
   useEffect(() => {
     fetch('/api/library').then(r => r.json()).then(d => { setVideos(d); setLoading(false) })
+    fetch('/api/platforms').then(r => r.json()).then(d => setConnections(d || []))
   }, [])
+
+  function openPostModal(video: Video) {
+    setSelected(video)
+    setShowPostModal(true)
+    setPostCaption(video.caption || '')
+    setPostPlatform(null)
+    setPostResult(null)
+    setShowSchedule(false)
+  }
+
+  async function postNow() {
+    if (!selected || !postPlatform) return
+    setPostLoading(true)
+    setPostResult(null)
+    const res = await fetch('/api/post', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ videoId: selected.id, platform: postPlatform, caption: postCaption }),
+    })
+    const data = await res.json()
+    setPostLoading(false)
+    if (res.ok) {
+      setPostResult({ type: 'success', msg: `Posted to ${postPlatform}!` })
+    } else {
+      setPostResult({ type: 'error', msg: data.error || 'Post failed' })
+    }
+  }
+
+  async function schedulePost() {
+    if (!selected || !postPlatform || !scheduleDate || !scheduleTime) return
+    setPostLoading(true)
+    setPostResult(null)
+    const scheduledAt = new Date(`${scheduleDate}T${scheduleTime}`).toISOString()
+    const res = await fetch('/api/schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ videoId: selected.id, platform: postPlatform, scheduledAt, caption: postCaption }),
+    })
+    const data = await res.json()
+    setPostLoading(false)
+    if (res.ok) {
+      setPostResult({ type: 'success', msg: `Scheduled for ${scheduleDate} at ${scheduleTime}!` })
+    } else {
+      setPostResult({ type: 'error', msg: data.error || 'Schedule failed' })
+    }
+  }
+
+  const connectedPlatforms = new Set(connections.map(c => c.platform))
 
   const filtered = activeTab === 'All'
     ? videos
@@ -132,7 +195,7 @@ export default function LibraryPage() {
       )}
 
       {/* Video modal */}
-      {selected && (
+      {selected && !showPostModal && (
         <div
           className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
           onClick={() => setSelected(null)}
@@ -141,7 +204,6 @@ export default function LibraryPage() {
             className="bg-[#18181b] rounded-2xl overflow-hidden border border-zinc-800/60 max-w-sm w-full shadow-2xl shadow-black/60"
             onClick={e => e.stopPropagation()}
           >
-            {/* Close button */}
             <div className="relative">
               <video
                 src={selected.public_url}
@@ -173,12 +235,138 @@ export default function LibraryPage() {
                   <Download size={12} /> Download
                 </a>
                 <button
+                  onClick={() => openPostModal(selected)}
                   className="flex items-center gap-2 px-3 py-2.5 bg-orange-500 hover:bg-orange-400 text-white rounded-xl text-xs font-medium transition-all duration-200 flex-1 justify-center shadow-lg shadow-orange-500/25"
                 >
-                  <Calendar size={12} /> Schedule
+                  <Send size={12} /> Post / Schedule
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Post / Schedule modal */}
+      {showPostModal && selected && (
+        <div
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+          onClick={() => { setShowPostModal(false); setSelected(null) }}
+        >
+          <div
+            className="bg-[#18181b] rounded-2xl border border-zinc-800/60 max-w-md w-full shadow-2xl shadow-black/60 p-5 space-y-5"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-bold text-white">Post Video</h2>
+              <button
+                onClick={() => { setShowPostModal(false); setSelected(null) }}
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-zinc-500 hover:text-white hover:bg-zinc-800 transition-all"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            {/* Result banner */}
+            {postResult && (
+              <div className={`flex items-center gap-2 text-sm px-4 py-3 rounded-xl ${
+                postResult.type === 'success'
+                  ? 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/20'
+                  : 'text-red-400 bg-red-500/10 border border-red-500/20'
+              }`}>
+                {postResult.type === 'success' ? <Check size={14} /> : <AlertCircle size={14} />}
+                {postResult.msg}
+              </div>
+            )}
+
+            {/* Platform selection */}
+            <div className="space-y-2">
+              <p className="text-xs text-zinc-500 font-medium">Select platform</p>
+              <div className="flex gap-2">
+                {(['tiktok', 'instagram', 'youtube'] as const).map(p => {
+                  const isConnected = connectedPlatforms.has(p)
+                  const labels: Record<string, string> = { tiktok: 'TikTok', instagram: 'Instagram', youtube: 'YouTube' }
+                  const colors: Record<string, string> = {
+                    tiktok: postPlatform === p ? 'border-pink-500 bg-pink-500/10 text-pink-300' : 'border-zinc-700 text-zinc-400',
+                    instagram: postPlatform === p ? 'border-purple-500 bg-purple-500/10 text-purple-300' : 'border-zinc-700 text-zinc-400',
+                    youtube: postPlatform === p ? 'border-red-500 bg-red-500/10 text-red-300' : 'border-zinc-700 text-zinc-400',
+                  }
+                  return (
+                    <button
+                      key={p}
+                      onClick={() => isConnected && setPostPlatform(p)}
+                      disabled={!isConnected}
+                      className={`flex-1 py-2.5 rounded-xl border text-xs font-medium transition-all ${
+                        isConnected ? colors[p] + ' hover:opacity-90 cursor-pointer' : 'border-zinc-800 text-zinc-600 cursor-not-allowed opacity-50'
+                      }`}
+                    >
+                      {labels[p]}
+                      {!isConnected && <span className="block text-[10px] mt-0.5 opacity-60">Not connected</span>}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* Caption */}
+            <div className="space-y-2">
+              <p className="text-xs text-zinc-500 font-medium">Caption</p>
+              <textarea
+                value={postCaption}
+                onChange={e => setPostCaption(e.target.value)}
+                rows={3}
+                className="w-full bg-zinc-900/80 border border-zinc-800 rounded-xl px-3 py-2.5 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-orange-500/60 resize-none"
+                placeholder="Write a caption..."
+              />
+            </div>
+
+            {/* Schedule toggle */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowSchedule(false)}
+                className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all ${!showSchedule ? 'bg-orange-500 text-white' : 'bg-zinc-900 border border-zinc-800 text-zinc-400'}`}
+              >
+                <Send size={11} className="inline mr-1.5" />Post Now
+              </button>
+              <button
+                onClick={() => setShowSchedule(true)}
+                className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all ${showSchedule ? 'bg-orange-500 text-white' : 'bg-zinc-900 border border-zinc-800 text-zinc-400'}`}
+              >
+                <Calendar size={11} className="inline mr-1.5" />Schedule
+              </button>
+            </div>
+
+            {/* Schedule date/time */}
+            {showSchedule && (
+              <div className="flex gap-2">
+                <input
+                  type="date"
+                  value={scheduleDate}
+                  onChange={e => setScheduleDate(e.target.value)}
+                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500/60"
+                />
+                <input
+                  type="time"
+                  value={scheduleTime}
+                  onChange={e => setScheduleTime(e.target.value)}
+                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500/60"
+                />
+              </div>
+            )}
+
+            {/* Action button */}
+            <button
+              onClick={showSchedule ? schedulePost : postNow}
+              disabled={!postPlatform || postLoading || (showSchedule && (!scheduleDate || !scheduleTime))}
+              className="w-full py-3 bg-orange-500 hover:bg-orange-400 disabled:opacity-40 disabled:hover:bg-orange-500 text-white font-semibold rounded-xl text-sm transition-all shadow-lg shadow-orange-500/25 flex items-center justify-center gap-2"
+            >
+              {postLoading ? (
+                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : showSchedule ? (
+                <><Calendar size={13} /> Schedule Post</>
+              ) : (
+                <><Send size={13} /> Post Now</>
+              )}
+            </button>
           </div>
         </div>
       )}

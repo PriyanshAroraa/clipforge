@@ -1,17 +1,27 @@
 'use client'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
-import { Zap, BookImage, CalendarDays, BarChart2, Plus } from 'lucide-react'
+import { usePathname, useRouter } from 'next/navigation'
+import { Zap, BookImage, CalendarDays, BarChart2, Link2, Plus, LogOut } from 'lucide-react'
+import { createClient } from '@/utils/supabase/client'
 
 const nav = [
   { href: '/blitz', label: 'Blitz', icon: Zap },
   { href: '/library', label: 'Library', icon: BookImage },
   { href: '/calendar', label: 'Calendar', icon: CalendarDays },
   { href: '/analytics', label: 'Analytics', icon: BarChart2 },
+  { href: '/connections', label: 'Connections', icon: Link2 },
 ]
 
 export default function Sidebar() {
   const path = usePathname()
+  const router = useRouter()
+
+  async function signOut() {
+    const supabase = createClient()
+    await supabase.auth.signOut()
+    router.push('/auth')
+  }
+
   return (
     <aside className="w-52 bg-[#09090b] border-r border-zinc-800/50 flex flex-col py-5 px-3 shrink-0">
       {/* Logo */}
@@ -50,7 +60,7 @@ export default function Sidebar() {
       </nav>
 
       {/* Bottom */}
-      <div className="mt-auto pt-4 border-t border-zinc-800/60">
+      <div className="mt-auto pt-4 border-t border-zinc-800/60 space-y-1">
         <Link
           href="/onboarding"
           className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium text-orange-400 border border-orange-500/30 hover:bg-orange-500/10 hover:border-orange-500/50 transition-all duration-200"
@@ -58,6 +68,13 @@ export default function Sidebar() {
           <Plus size={14} />
           New Brand
         </Link>
+        <button
+          onClick={signOut}
+          className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-300 transition-all duration-200"
+        >
+          <LogOut size={14} />
+          Sign out
+        </button>
       </div>
     </aside>
   )

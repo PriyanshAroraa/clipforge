@@ -9,7 +9,7 @@ const ENGINES = ['Wall of Text', 'Hook + Demo', 'Green Screen Meme', 'Reddit Vid
 
 export default function OnboardingPage() {
   const [step, setStep] = useState<Step>('input')
-  const [url, setUrl] = useState('http://ownersclub.invinciblegg.com/')
+  const [url, setUrl] = useState('')
   const [brief, setBrief] = useState<any>(null)
   const [brandId, setBrandId] = useState<number | null>(null)
   const [error, setError] = useState('')
@@ -28,7 +28,6 @@ export default function OnboardingPage() {
       if (!res.ok) throw new Error(data.error)
       setBrief(data.brief)
       setBrandId(data.brandId)
-      localStorage.setItem('clipforge_brand_id', String(data.brandId))
       setStep('brief')
     } catch(e: any) {
       setError(e.message)
